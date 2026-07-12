@@ -11,7 +11,7 @@ from rich.console import Console
 from rich.text import Text
 import subprocess
 
-SPEED_FACTOR = 5
+SPEED_FACTOR = 1
 CHANNEL_COUNT = 1
 SAMPLE_RATE = 16000
 CHUNK_SIZE = 2048 # 2 chunks per frame, a frame is a single s16
@@ -20,7 +20,7 @@ FF_CMD = [
     "ffmpeg",
     "-loglevel", "31",
     "-ss", "00:00:00",
-    "-i", "/tmp/a.mp3",
+    "-i", "test.mp3",
     "-ac", "1",
     "-ar", "16000",
     "-f", "s16le",
@@ -59,6 +59,12 @@ class SodaClient():
         self.audio_queue = queue.Queue(maxsize=100) # Buffer up to 100 chunks
         self.running = False
         self.handle = None
+
+        # 1. Create a thread-safe Queue
+        self.tts_queue = queue.Queue()
+        # 2. Start a dedicated background worker thread
+        self.tts_worker = threading.Thread(target=self._tts_worker_loop, daemon=True)
+        self.tts_worker.start()
 
     def _producer_thread(self):
         """Reads data from FFmpeg and pushes to the queue."""
@@ -130,12 +136,28 @@ class SodaClient():
     def delete(self):
         self.sodalib.DeleteExtendedSodaAsync(self.handle)
 
+    def _tts_worker_loop(self):
+        """ This runs in a separate thread and processes one item at a time. """
+        while True:
+            # This line blocks the worker thread (but NOT your main program)
+            # until an item is available in the queue.
+            text_to_speak = self.tts_queue.get()
+            try:
+                # Run the process synchronously inside this background thread
+                subprocess.run(["bash", "tts.sh", text_to_speak], check=True)
+            except Exception as e:
+                print(f"Error playing TTS: {e}")
+            finally:
+                # Mark the task as done
+                self.tts_queue.task_done()
+
     def resultHandler(self, response, rlen, instance):
         res = SodaResponse()
         res.ParseFromString(ctypes.string_at(response, rlen))
         if res.soda_type == SodaResponse.SodaMessageType.RECOGNITION:
             if res.recognition_result.result_type == SodaRecognitionResult.ResultType.FINAL:
                 self.console.print(f'[green]*[/green] {res.recognition_result.hypothesis[0]}')
+                self.tts_queue.put(res.recognition_result.hypothesis[0])
 
             elif res.recognition_result.result_type == SodaRecognitionResult.ResultType.PARTIAL:
                 text = Text.from_markup(f'[yellow]*[/yellow] {res.recognition_result.hypothesis[0]}')
